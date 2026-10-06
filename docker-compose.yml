@@ -1,0 +1,27 @@
+services:
+  myjio-bot:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: myjio-bot
+    restart: unless-stopped
+    init: true
+    env_file:
+      - .env
+    ports:
+      - "8000:8000"
+    environment:
+      - PYTHONUNBUFFERED=1
+      - PID_FILE=/app/data/.grizzly_myjio.pid
+    volumes:
+      - ./data:/app/data
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 256M

@@ -1,0 +1,9 @@
+.env
+__pycache__/
+*.pyc
+*.pid
+.grizzly_myjio.pid
+*.log
+data/
+web/node_modules/
+web/.next/

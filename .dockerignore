@@ -1,0 +1,13 @@
+.git
+.github
+.env
+__pycache__/
+*.py[cod]
+*$py.class
+*.pid
+.grizzly_myjio.pid
+*.log
+data/
+README.md
+.gitignore
+.dockerignore
