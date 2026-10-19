@@ -111,7 +111,8 @@ async def startup_event():
 
 # Request Models
 class ActionRequest(BaseModel):
-    action: str  # "start", "stop", "pause", "resume", "skip"
+    action: str  # "start", "stop", "pause", "resume", "skip", "refund", "refund_all", "clear"
+    activation_id: Optional[str] = None
 
 class ConfigUpdateRequest(BaseModel):
     api_key: Optional[str] = None
@@ -140,6 +141,17 @@ def perform_action(req: ActionRequest):
         engine.resume()
     elif act == "skip":
         engine.skip()
+    elif act == "refund":
+        aid = req.activation_id
+        if not aid and engine.active_id:
+            aid = engine.active_id
+        if not aid:
+            raise HTTPException(status_code=400, detail="Nomor ID aktivasi (activation_id) diperlukan untuk refund.")
+        res = engine.refund_number(str(aid))
+        return {"status": "ok" if res.get("success") else "warning", "action": act, "result": res, "engine_state": engine.get_state()}
+    elif act == "refund_all":
+        res = engine.refund_all()
+        return {"status": "ok", "action": act, "result": res, "engine_state": engine.get_state()}
     elif act == "clear":
         with engine._state_lock:
             engine.active_number = None
@@ -207,9 +219,10 @@ def get_logs():
 def get_prefixes():
     return {
         "presets": {
-            "tier1": {"name": "Tier 1 (Strict / Guaranteed)", "count": len(TIER_1_PREFIXES), "prefixes": TIER_1_PREFIXES},
-            "tier2": {"name": "Tier 2 (Popular / Moderate)", "count": len(PREFIX_PRESETS["tier2"]), "prefixes": PREFIX_PRESETS["tier2"]},
-            "tier3": {"name": "Tier 3 (Extended / All Known)", "count": len(PREFIX_PRESETS["tier3"]), "prefixes": PREFIX_PRESETS["tier3"]},
+            "tier1": {"name": "Tier 1 (Strict / 5 Prefixes)", "count": len(TIER_1_PREFIXES), "prefixes": TIER_1_PREFIXES},
+            "tier2": {"name": "Tier 2 (Popular / 35 Prefixes)", "count": len(PREFIX_PRESETS["tier2"]), "prefixes": PREFIX_PRESETS["tier2"]},
+            "tier3": {"name": "Tier 3 (Extended / 82 Prefixes)", "count": len(PREFIX_PRESETS["tier3"]), "prefixes": PREFIX_PRESETS["tier3"]},
+            "all": {"name": "ALL (Bebas / Verifikasi Playwright)", "count": "All", "prefixes": ["*"]},
         },
         "raw_tiers": {
             "tier1": TIER_1_PREFIXES,

@@ -37,7 +37,9 @@ PREFIX_PRESETS = {
     "tier2": TIER_1_PREFIXES + TIER_2_PREFIXES,
     "popular": TIER_1_PREFIXES + TIER_2_PREFIXES,
     "tier3": TIER_1_PREFIXES + TIER_2_PREFIXES + TIER_3_PREFIXES,
-    "all": TIER_1_PREFIXES + TIER_2_PREFIXES + TIER_3_PREFIXES,
+    "extended": TIER_1_PREFIXES + TIER_2_PREFIXES + TIER_3_PREFIXES,
+    "all": ["*"],
+    "any": ["*"],
 }
 
 def extract_national_number(raw_phone: str, country_prefix: str = "91") -> str:
@@ -49,6 +51,8 @@ def extract_national_number(raw_phone: str, country_prefix: str = "91") -> str:
     return cleaned
 
 def find_matching_prefix(national_num: str, target_prefixes: List[str]) -> Optional[str]:
+    if not target_prefixes or "*" in target_prefixes or "all" in [p.lower() for p in target_prefixes]:
+        return national_num[:3] if len(national_num) >= 3 else "ALL"
     for p in target_prefixes:
         if national_num.startswith(p):
             return p
@@ -315,6 +319,41 @@ class BotEngine:
         self._handle_log("INFO", f"⏩ User requested skip for #{self.active_id}.")
         self._skip_event.set()
 
+    def refund_number(self, activation_id: str) -> Dict[str, Any]:
+        """Attempt immediate refund for a specific number/activation."""
+        aid_str = str(activation_id).strip()
+        with self._state_lock:
+            if self.active_id and str(self.active_id) == aid_str:
+                self._handle_log("INFO", f"⚡ User requested immediate refund for active number +91 {self.active_number} (#{aid_str}).")
+                ph = self.active_number
+                self.cleanup_manager.add(aid_str, ph)
+                self._skip_event.set()
+
+        res = self.cleanup_manager.force_refund(aid_str)
+        bal, _ = self.client.get_balance()
+        if bal is not None:
+            with self._state_lock:
+                self.balance = bal
+        self._broadcast("state_changed", self.get_state())
+        return res
+
+    def refund_all(self) -> Dict[str, Any]:
+        """Attempt to refund all pending numbers in cooldown queue."""
+        with self._state_lock:
+            if self.active_id:
+                aid_str = str(self.active_id)
+                self._handle_log("INFO", f"⚡ Refunding active number +91 {self.active_number} (#{aid_str}) as part of refund all.")
+                self.cleanup_manager.add(aid_str, self.active_number)
+                self._skip_event.set()
+
+        res = self.cleanup_manager.force_refund_all()
+        bal, _ = self.client.get_balance()
+        if bal is not None:
+            with self._state_lock:
+                self.balance = bal
+        self._broadcast("state_changed", self.get_state())
+        return res
+
     def stop(self):
         with self._state_lock:
             if not self._is_running:
@@ -570,7 +609,8 @@ class BotEngine:
                     with self._state_lock:
                         self.latest_otp = otp_code
                         self.otps_count += 1
-                        self.status_message = f"OTP Received: {otp_code}"
+                        self.status_message = f"OTP Received: {otp_code} (Sesi Ditahan - Silakan Klaim)"
+                        self._is_paused = True
                     self.history.appendleft({
                         "id": aid,
                         "phone": nat_num,
@@ -592,6 +632,13 @@ class BotEngine:
                     for rem in batch_candidates:
                         self.cleanup_manager.add(rem["act_id"], rem["national_number"], requested_at=rem["requested_at"])
                     batch_candidates = []
+
+                    self._handle_log("INFO", f"⏸️ AUTO-PAUSE: Sesi login +91 {nat_num} ditahan di browser. Silakan klaim promo Anda. Klik 'Resume' di GUI jika sudah selesai.")
+                    while self._is_paused and not self._stop_event.is_set():
+                        time.sleep(0.5)
+
+                    if self._stop_event.is_set():
+                        break
                     break
 
             with self._state_lock:

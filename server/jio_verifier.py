@@ -1,13 +1,47 @@
 import threading
 import asyncio
 import time
+import os
+import subprocess
+import requests
 from typing import Tuple, Optional
 from pathlib import Path
 from playwright.async_api import async_playwright, Browser, BrowserContext, Page, Playwright
 
+CHROME_EXE = r"C:\Program Files\Google\Chrome\Application\chrome.exe"
+CDP_PORT = 9222
+CDP_URL = f"http://127.0.0.1:{CDP_PORT}"
+PROFILE_DIR = os.path.join(os.environ.get("LOCALAPPDATA", r"C:\Users\hazra\AppData\Local"), "Google", "Chrome", "User Data", "JioBotProfile")
+
+def is_cdp_available() -> bool:
+    try:
+        r = requests.get(f"{CDP_URL}/json/version", timeout=1.0)
+        return r.status_code == 200
+    except Exception:
+        return False
+
+def ensure_chrome_cdp():
+    if is_cdp_available():
+        return
+    os.makedirs(PROFILE_DIR, exist_ok=True)
+    cmd = [
+        CHROME_EXE,
+        f"--remote-debugging-port={CDP_PORT}",
+        f"--user-data-dir={PROFILE_DIR}",
+        "--no-first-run",
+        "--no-default-browser-check",
+        "--start-maximized"
+    ]
+    DETACHED = 0x00000008
+    subprocess.Popen(cmd, creationflags=DETACHED, close_fds=True)
+    for _ in range(25):
+        if is_cdp_available():
+            return
+        time.sleep(0.4)
+
 class JioPlaywrightVerifier:
     """
-    High-performance Jio Number Validator using Playwright Chromium.
+    High-performance Jio Number Validator using Playwright Chromium / Real Chrome via CDP.
     Runs inside a dedicated background worker thread with its own asyncio loop,
     ensuring thread-safety and zero interference with FastAPI or Windows asyncio loop.
     """
@@ -24,6 +58,7 @@ class JioPlaywrightVerifier:
         self._context: Optional[BrowserContext] = None
         self._page: Optional[Page] = None
         self._is_active = False
+        self._is_cdp = False
 
     def start(self):
         with self._lock:
@@ -53,16 +88,43 @@ class JioPlaywrightVerifier:
     async def _init_browser(self):
         try:
             self._playwright = await async_playwright().start()
-            self._browser = await self._playwright.chromium.launch(
-                headless=self.headless,
-                args=["--no-sandbox", "--disable-dev-shm-usage"]
-            )
-            self._context = await self._browser.new_context(
-                user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36",
-                viewport={"width": 1280, "height": 800}
-            )
-            self._page = await self._context.new_page()
+            if not self.headless:
+                ensure_chrome_cdp()
+                try:
+                    self._browser = await self._playwright.chromium.connect_over_cdp(CDP_URL)
+                    self._context = self._browser.contexts[0] if self._browser.contexts else await self._browser.new_context()
+                    self._page = await self._context.new_page()
+                    self._is_cdp = True
+                except Exception as e:
+                    print(f"[JioVerifier] CDP connect failed ({e}), fallback to standalone Chrome...")
+                    self._browser = await self._playwright.chromium.launch(
+                        channel="chrome",
+                        headless=False,
+                        args=["--start-maximized", "--disable-blink-features=AutomationControlled"]
+                    )
+                    self._context = await self._browser.new_context(
+                        user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36",
+                        no_viewport=True
+                    )
+                    self._page = await self._context.new_page()
+                    self._is_cdp = False
+            else:
+                self._browser = await self._playwright.chromium.launch(
+                    headless=True,
+                    args=["--no-sandbox", "--disable-dev-shm-usage"]
+                )
+                self._context = await self._browser.new_context(
+                    user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36",
+                    viewport={"width": 1280, "height": 800}
+                )
+                self._page = await self._context.new_page()
+                self._is_cdp = False
+
             await self._page.goto("https://www.jio.com/selfcare/login/", wait_until="networkidle", timeout=30000)
+            try:
+                await self._page.bring_to_front()
+            except Exception:
+                pass
             self._is_active = True
         except Exception as e:
             print(f"[JioVerifier] Browser init error: {e}")
@@ -70,12 +132,13 @@ class JioPlaywrightVerifier:
 
     async def _cleanup(self):
         try:
-            if self._page:
-                await self._page.close()
-            if self._context:
-                await self._context.close()
-            if self._browser:
-                await self._browser.close()
+            if not self._is_cdp:
+                if self._page:
+                    await self._page.close()
+                if self._context:
+                    await self._context.close()
+                if self._browser:
+                    await self._browser.close()
             if self._playwright:
                 await self._playwright.stop()
         except Exception:
@@ -106,9 +169,18 @@ class JioPlaywrightVerifier:
     async def _do_verify(self, clean_phone: str) -> Tuple[bool, str]:
         t0 = time.time()
         try:
+            if not self._page or self._page.is_closed():
+                if self._context:
+                    self._page = await self._context.new_page()
+
             # Ensure on login page
             if not self._page or "/login" not in self._page.url:
                 await self._page.goto("https://www.jio.com/selfcare/login/", wait_until="networkidle", timeout=15000)
+
+            try:
+                await self._page.bring_to_front()
+            except Exception:
+                pass
 
             input_field = self._page.locator("#inputField")
             await input_field.click()
@@ -118,33 +190,47 @@ class JioPlaywrightVerifier:
             btn = self._page.locator("button:has-text('Generate OTP')")
             await btn.click()
 
-            # Poll for response for up to 3 seconds
+            # Poll for response for up to 8 seconds
             is_invalid = False
             error_msg = ""
+            otp_screen_ready = False
 
-            for _ in range(6):
-                await asyncio.sleep(0.4)
+            for _ in range(25):
+                await asyncio.sleep(0.3)
 
-                # Check error container
-                error_el = self._page.locator("[class*='errorContainer']")
-                if await error_el.count() > 0:
-                    txt = (await error_el.first.inner_text()).strip()
-                    if "non-Jio" in txt or "invalid" in txt.lower():
-                        is_invalid = True
-                        error_msg = txt.replace("\n", " ")
-                        break
+                # Check error locators
+                error_locators = [
+                    self._page.locator("[class*='errorContainer']"),
+                    self._page.locator("[class*='errorText']"),
+                    self._page.locator("[class*='errorMessage']"),
+                    self._page.get_by_text("non-Jio", exact=False),
+                    self._page.get_by_text("invalid", exact=False),
+                    self._page.get_by_text("not a Jio", exact=False),
+                    self._page.get_by_text("try again with a Jio", exact=False),
+                ]
 
-                # Fallback text check
-                text_el = self._page.get_by_text("non-Jio number")
-                if await text_el.count() > 0:
-                    is_invalid = True
-                    error_msg = "It seems you have entered a non-Jio number"
+                for loc in error_locators:
+                    try:
+                        if await loc.count() > 0 and await loc.first.is_visible():
+                            txt = (await loc.first.inner_text()).strip()
+                            if any(k in txt.lower() for k in ["non-jio", "invalid", "not a jio", "try again", "enter a valid"]):
+                                is_invalid = True
+                                error_msg = txt.replace("\n", " ")
+                                break
+                    except Exception:
+                        pass
+
+                if is_invalid:
                     break
 
                 # Check if OTP screen appeared
                 otp_screen = self._page.locator("input[maxlength='1']")
-                if await otp_screen.count() > 0:
-                    break
+                try:
+                    if await otp_screen.count() >= 6 and await otp_screen.first.is_visible():
+                        otp_screen_ready = True
+                        break
+                except Exception:
+                    pass
 
             elapsed = round(time.time() - t0, 2)
 
@@ -158,10 +244,12 @@ class JioPlaywrightVerifier:
 
             if is_invalid:
                 return False, f"Non-Jio (Zonk): {error_msg} [{elapsed}s]"
+            elif not otp_screen_ready:
+                return False, f"Non-Jio: OTP screen did not appear [{elapsed}s]"
             else:
                 return True, f"Valid Jio Subscriber [{elapsed}s]"
         except Exception as e:
-            return True, f"Verification exception ({e})"
+            return False, f"Verification failed ({e})"
 
     def fill_otp(self, otp: str):
         """Asynchronously fill OTP into the Jio Selfcare verification boxes."""
@@ -182,6 +270,19 @@ class JioPlaywrightVerifier:
                 input_field = self._page.locator("#otpInput, input[type='number'], input[type='tel']")
                 if await input_field.count() > 0:
                     await input_field.first.fill(otp)
+
+            await asyncio.sleep(0.8)
+            submit_btn = self._page.locator("button:has-text('Submit'), button:has-text('Proceed'), button:has-text('Verify'), button[type='submit']")
+            if await submit_btn.count() > 0:
+                await submit_btn.first.click()
+
+            # Tangkap screenshot setelah OTP di-submit untuk Live View GUI
+            await asyncio.sleep(1.5)
+            try:
+                shot_path = Path(__file__).resolve().parent.parent / "web" / "public" / "live_jio.png"
+                await self._page.screenshot(path=str(shot_path), type="png")
+            except Exception:
+                pass
         except Exception as e:
             print(f"[JioVerifier] Error auto-filling OTP: {e}")
 

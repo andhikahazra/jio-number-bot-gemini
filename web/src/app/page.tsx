@@ -210,8 +210,7 @@ export default function Home() {
 
     const connect = () => {
       const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
-      const host = window.location.hostname;
-      const wsUrl = `${protocol}//${host}:8000/ws`;
+      const wsUrl = `${protocol}//${window.location.host}/ws`;
 
       ws = new WebSocket(wsUrl);
       wsRef.current = ws;
@@ -281,7 +280,7 @@ export default function Home() {
 
     const fetchHistory = async () => {
       try {
-        const res = await fetch(`http://${window.location.hostname}:8000/api/history`);
+        const res = await fetch(`/api/history`);
         if (res.ok) {
           const data = await res.json();
           setHistory(data);
@@ -308,13 +307,14 @@ export default function Home() {
   }, [logs, autoScrollLogs]);
 
   // Actions
-  const sendAction = async (action: string) => {
+  const sendAction = async (action: string, activationId?: string) => {
     try {
-      const host = window.location.hostname;
-      await fetch(`http://${host}:8000/api/action`, {
+      const payload: { action: string; activation_id?: string } = { action };
+      if (activationId) payload.activation_id = activationId;
+      await fetch(`/api/action`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ action }),
+        body: JSON.stringify(payload),
       });
     } catch (e) {
       console.error("Action error", e);
@@ -324,8 +324,7 @@ export default function Home() {
   const handlePresetSelect = async (selectedPreset: string) => {
     setPreset(selectedPreset);
     try {
-      const host = window.location.hostname;
-      await fetch(`http://${host}:8000/api/config`, {
+      await fetch(`/api/config`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ preset: selectedPreset }),
@@ -337,7 +336,6 @@ export default function Home() {
 
   const saveConfig = async () => {
     try {
-      const host = window.location.hostname;
       const payload: Record<string, unknown> = {
         preset,
         max_price: parseFloat(maxPrice) || 0.3,
@@ -350,7 +348,7 @@ export default function Home() {
         payload.api_key = apiKey.trim();
       }
 
-      const res = await fetch(`http://${host}:8000/api/config`, {
+      const res = await fetch(`/api/config`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(payload),
@@ -573,6 +571,16 @@ export default function Home() {
             >
               Tier 3 (Extended: 82 Prefixes)
             </button>
+            <button
+              onClick={() => handlePresetSelect("all")}
+              className={`px-3 py-1.5 text-xs font-semibold rounded-md tactile-btn transition-all ${
+                preset === "all"
+                  ? "bg-white text-slate-900 shadow-sm dark:bg-zinc-800 dark:text-zinc-100"
+                  : "text-slate-600 hover:text-slate-900 dark:text-zinc-400 dark:hover:text-zinc-200"
+              }`}
+            >
+              ⚡ ALL (Bebas: Verifikasi Playwright)
+            </button>
           </div>
 
           <div className="flex flex-wrap items-center gap-3">
@@ -680,6 +688,7 @@ export default function Home() {
                   <option value="tier1">Tier 1 (Strict: 600, 939, 700, 701, 702)</option>
                   <option value="tier2">Tier 2 (Popular: 35 Jio Prefixes)</option>
                   <option value="tier3">Tier 3 (Extended: 82 All Known Jio)</option>
+                  <option value="all">⚡ ALL (Bebas / Semua Nomor - Verifikasi Playwright)</option>
                 </select>
               </div>
 
@@ -971,6 +980,17 @@ export default function Home() {
                   >
                     Skip (Ineligible)
                   </button>
+
+                  <button
+                    onClick={() => sendAction("refund", state?.active_id || undefined)}
+                    className="w-full sm:w-auto px-5 py-3 rounded-lg border text-xs font-semibold tactile-btn flex items-center justify-center gap-1.5 bg-rose-50 hover:bg-rose-100 border-rose-300 text-rose-700 dark:bg-rose-950/40 dark:border-rose-900/60 dark:text-rose-300"
+                    title="Batalkan nomor ini dan minta pengembalian saldo (refund) langsung ke Grizzly SMS"
+                  >
+                    <svg className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
+                      <path strokeLinecap="round" strokeLinejoin="round" d="M16 15v-1a4 4 0 00-4-4H8m0 0l3 3m-3-3l3-3m9 14V5a2 2 0 00-2-2H6a2 2 0 00-2 2v16l4-2 4 2 4-2 4 2z" />
+                    </svg>
+                    Batalkan & Refund
+                  </button>
                 </div>
 
                 <p className="text-[11px] text-slate-500 dark:text-zinc-400">
@@ -1102,9 +1122,20 @@ export default function Home() {
                     </p>
                   </div>
                 </div>
-                <span className="text-xs font-mono text-slate-500 dark:text-zinc-400 font-medium">
-                  {state?.cooldown_pending?.length || 0} pending
-                </span>
+                <div className="flex items-center gap-2">
+                  <span className="text-xs font-mono text-slate-500 dark:text-zinc-400 font-medium">
+                    {state?.cooldown_pending?.length || 0} pending
+                  </span>
+                  {state?.cooldown_pending && state.cooldown_pending.length > 0 && (
+                    <button
+                      onClick={() => sendAction("refund_all")}
+                      className="px-2 py-0.5 text-[11px] font-semibold rounded bg-amber-100 hover:bg-amber-200 text-amber-900 border border-amber-300 dark:bg-amber-950/60 dark:border-amber-700 dark:text-amber-300 tactile-btn"
+                      title="Paksa refund semua nomor dalam antrean sekaligus"
+                    >
+                      ⚡ Refund Semua
+                    </button>
+                  )}
+                </div>
               </div>
 
               <div className="space-y-2 max-h-48 overflow-y-auto pr-1">
@@ -1118,18 +1149,25 @@ export default function Home() {
                         +91 {item.phone_number}
                         <span className="ml-1.5 text-slate-500 dark:text-zinc-400">(#{item.activation_id})</span>
                       </div>
-                      <div>
+                      <div className="flex items-center gap-2.5">
                         {item.remaining_cooldown > 0 ? (
                           <span className="inline-flex items-center gap-1.5 text-xs text-amber-700 dark:text-amber-400 font-medium">
                             <span className="w-1.5 h-1.5 rounded-full bg-amber-500"></span>
-                            Refund in {item.remaining_cooldown}s
+                            {item.remaining_cooldown}s
                           </span>
                         ) : (
                           <span className="inline-flex items-center gap-1.5 text-xs text-emerald-700 dark:text-emerald-400 font-medium">
                             <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse"></span>
-                            Refunding now
+                            Siap
                           </span>
                         )}
+                        <button
+                          onClick={() => sendAction("refund", item.activation_id)}
+                          className="px-2 py-0.5 text-[11px] font-medium rounded border transition-colors bg-white hover:bg-rose-50 border-slate-300 text-slate-700 hover:text-rose-700 hover:border-rose-300 dark:bg-zinc-800 dark:border-zinc-700 dark:text-zinc-300 dark:hover:bg-rose-950/40 dark:hover:border-rose-800 dark:hover:text-rose-300 tactile-btn"
+                          title="Coba minta refund nomor ini sekarang ke Grizzly SMS"
+                        >
+                          ⚡ Refund
+                        </button>
                       </div>
                     </div>
                   ))
